@@ -355,9 +355,10 @@ impl JmapClient {
                     "properties": [
                         "id", "threadId", "mailboxIds", "keywords",
                         "size", "receivedAt", "from", "to", "cc",
-                        "subject", "preview", "hasAttachment", "bodyValues"
+                        "subject", "preview", "hasAttachment", "textBody", "htmlBody", "bodyValues"
                     ],
-                    "fetchTextBodyValues": true
+                    "fetchTextBodyValues": true,
+                    "fetchHTMLBodyValues": true
                 },
                 "e0"
             ])])
