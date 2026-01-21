@@ -129,7 +129,10 @@ impl JmapClient {
 
     /// Check if email submission (sending) is available
     fn require_submission_capability(&self) -> Result<()> {
-        if !self.has_capability("urn:ietf:params:jmap:submission") {
+        // First ensure we have a session
+        let session = self.session()?;
+
+        if !session.capabilities.contains_key("urn:ietf:params:jmap:submission") {
             return Err(Error::Config(
                 "Email sending requires the 'urn:ietf:params:jmap:submission' capability. \
                 Your API token may be read-only. Generate a new token with send permissions \
@@ -1451,6 +1454,20 @@ mod tests {
         let err_msg = err.to_string();
         assert!(err_msg.contains("urn:ietf:params:jmap:submission"));
         assert!(err_msg.contains("read-only"));
+    }
+
+    #[test]
+    fn test_require_submission_capability_fails_when_no_session() {
+        let client = JmapClient::new("test-token".to_string());
+
+        let result = client.require_submission_capability();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        // Should get "not authenticated" error, not "read-only" error
+        assert!(err_msg.contains("Authentication required"));
+        assert!(!err_msg.contains("read-only"));
     }
 
     #[test]
