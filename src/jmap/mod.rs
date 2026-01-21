@@ -11,7 +11,7 @@ use tracing::{debug, instrument};
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-const CAPABILITIES: &[&str] = &[
+const DESIRED_CAPABILITIES: &[&str] = &[
     "urn:ietf:params:jmap:core",
     "urn:ietf:params:jmap:mail",
     "urn:ietf:params:jmap:submission",
@@ -120,11 +120,37 @@ impl JmapClient {
         self.session.as_ref().ok_or(Error::NotAuthenticated)
     }
 
+    /// Check if a JMAP capability is available for this session
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| s.capabilities.contains_key(capability))
+    }
+
+    /// Check if email submission (sending) is available
+    fn require_submission_capability(&self) -> Result<()> {
+        if !self.has_capability("urn:ietf:params:jmap:submission") {
+            return Err(Error::Config(
+                "Email sending requires the 'urn:ietf:params:jmap:submission' capability. \
+                Your API token may be read-only. Generate a new token with send permissions \
+                at Fastmail Settings > Privacy & Security > Integrations > API tokens."
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     #[instrument(skip(self, method_calls))]
     async fn request(&self, method_calls: Vec<Value>) -> Result<Vec<Value>> {
         let session = self.session()?;
+        // Only use capabilities that are both desired AND available in the session
+        let available_capabilities: Vec<String> = DESIRED_CAPABILITIES
+            .iter()
+            .filter(|cap| session.capabilities.contains_key(**cap))
+            .map(|s| s.to_string())
+            .collect();
         let req = JmapRequest {
-            using: CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            using: available_capabilities,
             method_calls,
         };
 
@@ -144,7 +170,14 @@ impl JmapClient {
             _ => {}
         }
 
-        let jmap_resp: JmapResponse = resp.json().await?;
+        // Get response as text first to handle plain text API errors
+        let body = resp.text().await?;
+
+        // Try to parse as JSON, but if it fails, show the raw response
+        // (API may return plain text errors for capability/permission issues)
+        let jmap_resp: JmapResponse = serde_json::from_str(&body).map_err(|_| {
+            Error::Server(body.trim().to_string())
+        })?;
         Ok(jmap_resp.method_responses)
     }
 
@@ -532,6 +565,9 @@ impl JmapClient {
         body: &str,
         in_reply_to: Option<&str>,
     ) -> Result<String> {
+        // Check for submission capability before attempting to send
+        self.require_submission_capability()?;
+
         let account_id = self
             .session()?
             .primary_account_id()
@@ -758,6 +794,9 @@ impl JmapClient {
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
     ) -> Result<String> {
+        // Check for submission capability before attempting to send
+        self.require_submission_capability()?;
+
         let account_id = self
             .session()?
             .primary_account_id()
@@ -952,6 +991,9 @@ impl JmapClient {
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
     ) -> Result<String> {
+        // Check for submission capability before attempting to send
+        self.require_submission_capability()?;
+
         let account_id = self
             .session()?
             .primary_account_id()
