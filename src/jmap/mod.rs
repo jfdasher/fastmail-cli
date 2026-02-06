@@ -24,6 +24,48 @@ pub struct JmapClient {
     session: Option<Session>,
 }
 
+/// Create an authenticated JMAP client from config
+pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
+    let config = crate::config::Config::load()?;
+    let token = config.get_token()?;
+    let mut client = JmapClient::new(token);
+    client.authenticate().await?;
+    Ok(client)
+}
+
+// Shared JMAP response types used across multiple methods
+#[derive(Deserialize)]
+struct GetResponse<T> {
+    list: Vec<T>,
+}
+
+#[derive(Deserialize)]
+struct GetResponseWithNotFound<T> {
+    list: Vec<T>,
+    #[serde(rename = "notFound")]
+    not_found: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct EmailSetResponse {
+    created: Option<HashMap<String, Value>>,
+    #[serde(rename = "notCreated")]
+    not_created: Option<HashMap<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct SetResponse {
+    #[serde(rename = "notUpdated")]
+    not_updated: Option<HashMap<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct MaskedEmailCreateResponse {
+    created: Option<HashMap<String, MaskedEmail>>,
+    #[serde(rename = "notCreated")]
+    not_created: Option<HashMap<String, Value>>,
+}
+
 #[derive(Debug, Serialize)]
 struct JmapRequest {
     using: Vec<String>,
@@ -170,12 +212,7 @@ impl JmapClient {
             ])])
             .await?;
 
-        #[derive(Deserialize)]
-        struct MailboxGetResponse {
-            list: Vec<Mailbox>,
-        }
-
-        let resp: MailboxGetResponse =
+        let resp: GetResponse<Mailbox> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Mailbox/get")?;
 
         Ok(resp.list)
@@ -241,12 +278,7 @@ impl JmapClient {
             ])
             .await?;
 
-        #[derive(Deserialize)]
-        struct EmailGetResponse {
-            list: Vec<Email>,
-        }
-
-        let resp: EmailGetResponse =
+        let resp: GetResponse<Email> =
             Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
 
         Ok(resp.list)
@@ -279,14 +311,7 @@ impl JmapClient {
             ])])
             .await?;
 
-        #[derive(Deserialize)]
-        struct EmailGetResponse {
-            list: Vec<Email>,
-            #[serde(rename = "notFound")]
-            not_found: Vec<String>,
-        }
-
-        let resp: EmailGetResponse =
+        let resp: GetResponseWithNotFound<Email> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
 
         if !resp.not_found.is_empty() {
@@ -331,12 +356,7 @@ impl JmapClient {
             email_ids: Vec<String>,
         }
 
-        #[derive(Deserialize)]
-        struct ThreadGetResponse {
-            list: Vec<Thread>,
-        }
-
-        let thread_resp: ThreadGetResponse =
+        let thread_resp: GetResponse<Thread> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Thread/get")?;
 
         let thread = thread_resp
@@ -364,12 +384,7 @@ impl JmapClient {
             ])])
             .await?;
 
-        #[derive(Deserialize)]
-        struct EmailGetResponse {
-            list: Vec<Email>,
-        }
-
-        let resp: EmailGetResponse =
+        let resp: GetResponse<Email> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
 
         Ok(resp.list)
@@ -480,12 +495,7 @@ impl JmapClient {
             ])
             .await?;
 
-        #[derive(Deserialize)]
-        struct EmailGetResponse {
-            list: Vec<Email>,
-        }
-
-        let resp: EmailGetResponse =
+        let resp: GetResponse<Email> =
             Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
 
         Ok(resp.list)
@@ -506,12 +516,7 @@ impl JmapClient {
             ])])
             .await?;
 
-        #[derive(Deserialize)]
-        struct IdentityGetResponse {
-            list: Vec<Identity>,
-        }
-
-        let resp: IdentityGetResponse =
+        let resp: GetResponse<Identity> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Identity/get")?;
 
         Ok(resp.list)
@@ -616,13 +621,6 @@ impl JmapClient {
             ])
             .await?;
 
-        #[derive(Deserialize)]
-        struct EmailSetResponse {
-            created: Option<HashMap<String, Value>>,
-            #[serde(rename = "notCreated")]
-            not_created: Option<HashMap<String, Value>>,
-        }
-
         let email_resp: EmailSetResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
 
@@ -683,12 +681,6 @@ impl JmapClient {
                 "m0"
             ])])
             .await?;
-
-        #[derive(Deserialize)]
-        struct SetResponse {
-            #[serde(rename = "notUpdated")]
-            not_updated: Option<HashMap<String, Value>>,
-        }
 
         let resp: SetResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
@@ -911,13 +903,6 @@ impl JmapClient {
             ])
             .await?;
 
-        #[derive(Deserialize)]
-        struct EmailSetResponse {
-            created: Option<HashMap<String, Value>>,
-            #[serde(rename = "notCreated")]
-            not_created: Option<HashMap<String, Value>>,
-        }
-
         let email_resp: EmailSetResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
 
@@ -1096,13 +1081,6 @@ impl JmapClient {
             ])
             .await?;
 
-        #[derive(Deserialize)]
-        struct EmailSetResponse {
-            created: Option<HashMap<String, Value>>,
-            #[serde(rename = "notCreated")]
-            not_created: Option<HashMap<String, Value>>,
-        }
-
         let email_resp: EmailSetResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
 
@@ -1142,7 +1120,6 @@ impl JmapClient {
         Ok(email_id)
     }
 
-    #[allow(dead_code)]
     #[instrument(skip(self))]
     pub async fn set_keywords(
         &self,
@@ -1168,12 +1145,6 @@ impl JmapClient {
                 "k0"
             ])])
             .await?;
-
-        #[derive(Deserialize)]
-        struct SetResponse {
-            #[serde(rename = "notUpdated")]
-            not_updated: Option<HashMap<String, Value>>,
-        }
 
         let resp: SetResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
@@ -1218,12 +1189,7 @@ impl JmapClient {
             ])])
             .await?;
 
-        #[derive(Deserialize)]
-        struct MaskedEmailGetResponse {
-            list: Vec<MaskedEmail>,
-        }
-
-        let resp: MaskedEmailGetResponse =
+        let resp: GetResponse<MaskedEmail> =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/get")?;
 
         Ok(resp.list)
@@ -1266,14 +1232,7 @@ impl JmapClient {
             ])])
             .await?;
 
-        #[derive(Deserialize)]
-        struct MaskedEmailSetResponse {
-            created: Option<HashMap<String, MaskedEmail>>,
-            #[serde(rename = "notCreated")]
-            not_created: Option<HashMap<String, Value>>,
-        }
-
-        let resp: MaskedEmailSetResponse =
+        let resp: MaskedEmailCreateResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/set")?;
 
         if let Some(ref not_created) = resp.not_created
@@ -1338,12 +1297,6 @@ impl JmapClient {
                 "me0"
             ])])
             .await?;
-
-        #[derive(Deserialize)]
-        struct SetResponse {
-            #[serde(rename = "notUpdated")]
-            not_updated: Option<HashMap<String, Value>>,
-        }
 
         let resp: SetResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/set")?;

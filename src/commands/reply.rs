@@ -1,5 +1,4 @@
-use crate::config::Config;
-use crate::jmap::JmapClient;
+use crate::jmap::authenticated_client;
 use crate::models::Output;
 use crate::util::parse_addresses;
 
@@ -10,11 +9,7 @@ pub async fn reply(
     cc: Option<&str>,
     bcc: Option<&str>,
 ) -> anyhow::Result<()> {
-    let config = Config::load()?;
-    let token = config.get_token()?;
-
-    let mut client = JmapClient::new(token.to_string());
-    client.authenticate().await?;
+    let client = authenticated_client().await?;
 
     let original = client.get_email(email_id).await?;
 
