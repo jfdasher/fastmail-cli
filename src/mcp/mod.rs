@@ -16,7 +16,9 @@ use crate::carddav::CardDavClient;
 use crate::config::Config;
 use crate::jmap::JmapClient;
 use crate::models::EmailAddress;
-use crate::util::{MCP_IMAGE_MAX_BYTES, extract_text, infer_image_mime, is_image, resize_image};
+use crate::util::{
+    MCP_IMAGE_MAX_BYTES, extract_text, infer_image_mime, is_image, parse_addresses, resize_image,
+};
 
 type ToolResult = std::result::Result<CallToolResult, McpError>;
 
@@ -231,15 +233,6 @@ impl FastmailMcp {
 
     fn error_result(msg: impl Into<String>) -> ToolResult {
         Ok(CallToolResult::error(vec![Content::text(msg.into())]))
-    }
-
-    fn parse_addresses(s: &str) -> Vec<EmailAddress> {
-        s.split(',')
-            .map(|e| EmailAddress {
-                name: None,
-                email: e.trim().to_string(),
-            })
-            .collect()
     }
 }
 
@@ -506,16 +499,16 @@ impl FastmailMcp {
         description = "Compose and send a new email. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm'. NEVER skip the preview step."
     )]
     async fn send_email(&self, Parameters(req): Parameters<SendEmailRequest>) -> ToolResult {
-        let to_addrs = Self::parse_addresses(&req.to);
+        let to_addrs = parse_addresses(&req.to);
         let cc_addrs = req
             .cc
             .as_ref()
-            .map(|s| Self::parse_addresses(s))
+            .map(|s| parse_addresses(s))
             .unwrap_or_default();
         let bcc_addrs = req
             .bcc
             .as_ref()
-            .map(|s| Self::parse_addresses(s))
+            .map(|s| parse_addresses(s))
             .unwrap_or_default();
 
         if req.action == "preview" {
@@ -585,12 +578,12 @@ impl FastmailMcp {
         let cc_addrs = req
             .cc
             .as_ref()
-            .map(|s| Self::parse_addresses(s))
+            .map(|s| parse_addresses(s))
             .unwrap_or_default();
         let bcc_addrs = req
             .bcc
             .as_ref()
-            .map(|s| Self::parse_addresses(s))
+            .map(|s| parse_addresses(s))
             .unwrap_or_default();
 
         // Build subject
@@ -668,16 +661,16 @@ impl FastmailMcp {
             Err(e) => return Self::error_result(format!("Email not found: {}", e)),
         };
 
-        let to_addrs = Self::parse_addresses(&req.to);
+        let to_addrs = parse_addresses(&req.to);
         let cc_addrs = req
             .cc
             .as_ref()
-            .map(|s| Self::parse_addresses(s))
+            .map(|s| parse_addresses(s))
             .unwrap_or_default();
         let bcc_addrs = req
             .bcc
             .as_ref()
-            .map(|s| Self::parse_addresses(s))
+            .map(|s| parse_addresses(s))
             .unwrap_or_default();
         let body = req.body.as_deref().unwrap_or("");
 

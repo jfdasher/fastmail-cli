@@ -62,35 +62,6 @@ pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option
     }
 }
 
-/// Synchronous version for non-async contexts
-/// NOTE: Returns None for images - use existing image pipeline instead
-pub fn extract_text_sync(bytes: &[u8], filename: &str) -> anyhow::Result<Option<String>> {
-    use kreuzberg::{ExtractionConfig, extract_bytes_sync};
-
-    // Skip images - we have our own pipeline for those (resize + send to Claude)
-    if is_image_extension(filename) {
-        return Ok(None);
-    }
-
-    let mime_type = mime_from_filename(filename);
-    let config = ExtractionConfig::default();
-
-    match extract_bytes_sync(bytes, &mime_type, &config) {
-        Ok(result) => {
-            let content = result.content.trim();
-            if content.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(content.to_string()))
-            }
-        }
-        Err(e) => {
-            tracing::debug!("kreuzberg extraction failed for {}: {}", filename, e);
-            Ok(None)
-        }
-    }
-}
-
 /// Check if filename has an image extension (used to skip kreuzberg for images)
 fn is_image_extension(filename: &str) -> bool {
     let ext = Path::new(filename)
@@ -212,7 +183,7 @@ pub fn is_image(content_type: &str, filename: &str) -> bool {
         .to_lowercase();
     matches!(
         ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" | "heic"
     )
 }
 

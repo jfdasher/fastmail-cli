@@ -1,5 +1,4 @@
-use crate::config::Config;
-use crate::jmap::JmapClient;
+use crate::jmap::authenticated_client;
 use crate::models::Output;
 
 /// Search filter matching JMAP Email/query FilterCondition
@@ -23,11 +22,7 @@ pub struct SearchFilter {
 }
 
 pub async fn search(filter: SearchFilter, limit: u32) -> anyhow::Result<()> {
-    let config = Config::load()?;
-    let token = config.get_token()?;
-
-    let mut client = JmapClient::new(token.to_string());
-    client.authenticate().await?;
+    let client = authenticated_client().await?;
 
     // Resolve mailbox name to ID if specified
     let mailbox_id = if let Some(ref mailbox_name) = filter.mailbox {
