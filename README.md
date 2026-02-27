@@ -349,12 +349,7 @@ RUST_LOG=debug fastmail-cli list mailboxes
 
 ## JMAP API
 
-This CLI uses Fastmail's JMAP implementation. Key capabilities:
-
-- `urn:ietf:params:jmap:core`
-- `urn:ietf:params:jmap:mail`
-- `urn:ietf:params:jmap:submission`
-- `https://www.fastmail.com/dev/maskedemail`
+This CLI uses Fastmail's JMAP implementation. Capabilities are filtered dynamically based on your API token's permissions — read-only tokens work fine for listing/reading, while send and masked email operations require appropriate capabilities.
 
 For more on JMAP: [jmap.io](https://jmap.io/)
 
