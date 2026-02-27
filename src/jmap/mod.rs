@@ -22,6 +22,7 @@ pub struct JmapClient {
     client: Client,
     token: String,
     session: Option<Session>,
+    available_capabilities: Vec<String>,
 }
 
 /// Create an authenticated JMAP client from config
@@ -90,6 +91,7 @@ impl JmapClient {
             client,
             token,
             session: None,
+            available_capabilities: Vec::new(),
         }
     }
 
@@ -112,6 +114,11 @@ impl JmapClient {
 
         let session: Session = resp.json().await?;
         debug!(username = %session.username, "Session established");
+        self.available_capabilities = DESIRED_CAPABILITIES
+            .iter()
+            .filter(|cap| session.capabilities.contains_key(**cap))
+            .map(|s| s.to_string())
+            .collect();
         self.session = Some(session);
         Ok(self.session.as_ref().unwrap())
     }
@@ -120,16 +127,15 @@ impl JmapClient {
         self.session.as_ref().ok_or(Error::NotAuthenticated)
     }
 
-    fn require_submission_capability(&self) -> Result<()> {
+    fn require_capability(&self, capability: &str, action: &str) -> Result<()> {
         let session = self.session()?;
 
-        if !session.capabilities.contains_key("urn:ietf:params:jmap:submission") {
-            return Err(Error::Config(
-                "Email sending requires the 'urn:ietf:params:jmap:submission' capability. \
-                Your API token may be read-only. Generate a new token with send permissions \
+        if !session.capabilities.contains_key(capability) {
+            return Err(Error::Config(format!(
+                "{action} requires the '{capability}' capability. \
+                Your API token may be read-only. Generate a new token with appropriate permissions \
                 at Fastmail Settings > Privacy & Security > Integrations > API tokens."
-                    .into(),
-            ));
+            )));
         }
         Ok(())
     }
@@ -137,13 +143,8 @@ impl JmapClient {
     #[instrument(skip(self, method_calls))]
     async fn request(&self, method_calls: Vec<Value>) -> Result<Vec<Value>> {
         let session = self.session()?;
-        let available_capabilities: Vec<String> = DESIRED_CAPABILITIES
-            .iter()
-            .filter(|cap| session.capabilities.contains_key(**cap))
-            .map(|s| s.to_string())
-            .collect();
         let req = JmapRequest {
-            using: available_capabilities,
+            using: self.available_capabilities.clone(),
             method_calls,
         };
 
@@ -164,8 +165,10 @@ impl JmapClient {
         }
 
         let body = resp.text().await?;
-        let jmap_resp: JmapResponse = serde_json::from_str(&body)
-            .map_err(|_| Error::Server(body.trim().to_string()))?;
+        let jmap_resp: JmapResponse = serde_json::from_str(&body).map_err(|e| {
+            debug!("Failed to parse JMAP response: {e}");
+            Error::Server(body.trim().to_string())
+        })?;
         Ok(jmap_resp.method_responses)
     }
 
@@ -553,7 +556,7 @@ impl JmapClient {
         body: &str,
         in_reply_to: Option<&str>,
     ) -> Result<String> {
-        self.require_submission_capability()?;
+        self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
 
         let account_id = self
             .session()?
@@ -781,7 +784,7 @@ impl JmapClient {
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
     ) -> Result<String> {
-        self.require_submission_capability()?;
+        self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
 
         let account_id = self
             .session()?
@@ -977,7 +980,7 @@ impl JmapClient {
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
     ) -> Result<String> {
-        self.require_submission_capability()?;
+        self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
 
         let account_id = self
             .session()?
@@ -1200,6 +1203,7 @@ impl JmapClient {
     /// List all masked email addresses
     #[instrument(skip(self))]
     pub async fn list_masked_emails(&self) -> Result<Vec<MaskedEmail>> {
+        self.require_capability("https://www.fastmail.com/dev/maskedemail", "Masked email")?;
         let account_id = self
             .session()?
             .primary_account_id()
@@ -1230,6 +1234,7 @@ impl JmapClient {
         description: Option<&str>,
         email_prefix: Option<&str>,
     ) -> Result<MaskedEmail> {
+        self.require_capability("https://www.fastmail.com/dev/maskedemail", "Masked email")?;
         let account_id = self
             .session()?
             .primary_account_id()
@@ -1298,6 +1303,7 @@ impl JmapClient {
         for_domain: Option<&str>,
         description: Option<&str>,
     ) -> Result<()> {
+        self.require_capability("https://www.fastmail.com/dev/maskedemail", "Masked email")?;
         let account_id = self
             .session()?
             .primary_account_id()
@@ -1380,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_require_submission_capability_succeeds_when_present() {
+    fn test_require_capability_succeeds_when_present() {
         let mut client = JmapClient::new("test-token".to_string());
         client.session = Some(create_test_session(vec![
             "urn:ietf:params:jmap:core",
@@ -1388,58 +1394,52 @@ mod tests {
             "urn:ietf:params:jmap:submission",
         ]));
 
-        assert!(client.require_submission_capability().is_ok());
+        assert!(client
+            .require_capability("urn:ietf:params:jmap:submission", "Email sending")
+            .is_ok());
     }
 
     #[test]
-    fn test_require_submission_capability_fails_when_missing() {
+    fn test_require_capability_fails_when_missing() {
         let mut client = JmapClient::new("test-token".to_string());
         client.session = Some(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
         ]));
 
-        let result = client.require_submission_capability();
+        let result = client.require_capability("urn:ietf:params:jmap:submission", "Email sending");
         assert!(result.is_err());
 
-        let err = result.unwrap_err();
-        let err_msg = err.to_string();
+        let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("urn:ietf:params:jmap:submission"));
         assert!(err_msg.contains("read-only"));
     }
 
     #[test]
-    fn test_require_submission_capability_fails_when_no_session() {
+    fn test_require_capability_fails_when_no_session() {
         let client = JmapClient::new("test-token".to_string());
 
-        let result = client.require_submission_capability();
+        let result = client.require_capability("urn:ietf:params:jmap:submission", "Email sending");
         assert!(result.is_err());
 
-        let err = result.unwrap_err();
-        let err_msg = err.to_string();
+        let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Authentication required"));
         assert!(!err_msg.contains("read-only"));
     }
 
     #[test]
-    fn test_desired_capabilities_filtered_by_session() {
-        assert!(DESIRED_CAPABILITIES.contains(&"urn:ietf:params:jmap:core"));
-        assert!(DESIRED_CAPABILITIES.contains(&"urn:ietf:params:jmap:mail"));
-        assert!(DESIRED_CAPABILITIES.contains(&"urn:ietf:params:jmap:submission"));
-        assert!(DESIRED_CAPABILITIES.contains(&"https://www.fastmail.com/dev/maskedemail"));
+    fn test_require_capability_works_for_masked_email() {
+        let mut client = JmapClient::new("test-token".to_string());
+        client.session = Some(create_test_session(vec![
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+        ]));
 
-        let session_caps = vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"];
-        let session = create_test_session(session_caps);
-
-        let filtered: Vec<String> = DESIRED_CAPABILITIES
-            .iter()
-            .filter(|cap| session.capabilities.contains_key(**cap))
-            .map(|s| s.to_string())
-            .collect();
-
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.contains(&"urn:ietf:params:jmap:core".to_string()));
-        assert!(filtered.contains(&"urn:ietf:params:jmap:mail".to_string()));
-        assert!(!filtered.contains(&"urn:ietf:params:jmap:submission".to_string()));
+        let result = client.require_capability(
+            "https://www.fastmail.com/dev/maskedemail",
+            "Masked email",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maskedemail"));
     }
 }
