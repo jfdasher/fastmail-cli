@@ -13,6 +13,8 @@
 
 - Identity resolution extracted into testable pure function
 
+Thanks to [@bgilly](https://github.com/bgilly) for the original PR (#6).
+
 ## [1.7.2] - 2026-02-27
 
 ### Fixed
@@ -26,6 +28,8 @@
 
 - Capabilities are computed once at authentication, not on every request
 - `require_capability` is now generic — used for both submission and masked email checks
+
+Thanks to [@kylehowells](https://github.com/kylehowells) for the original PR (#4).
 
 ## [1.7.0] - 2026-01-11
 
