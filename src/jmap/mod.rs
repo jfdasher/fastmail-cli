@@ -1394,9 +1394,11 @@ mod tests {
             "urn:ietf:params:jmap:submission",
         ]));
 
-        assert!(client
-            .require_capability("urn:ietf:params:jmap:submission", "Email sending")
-            .is_ok());
+        assert!(
+            client
+                .require_capability("urn:ietf:params:jmap:submission", "Email sending")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1435,10 +1437,8 @@ mod tests {
             "urn:ietf:params:jmap:mail",
         ]));
 
-        let result = client.require_capability(
-            "https://www.fastmail.com/dev/maskedemail",
-            "Masked email",
-        );
+        let result =
+            client.require_capability("https://www.fastmail.com/dev/maskedemail", "Masked email");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("maskedemail"));
     }
