@@ -11,7 +11,7 @@ use tracing::{debug, instrument};
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-const CAPABILITIES: &[&str] = &[
+const DESIRED_CAPABILITIES: &[&str] = &[
     "urn:ietf:params:jmap:core",
     "urn:ietf:params:jmap:mail",
     "urn:ietf:params:jmap:submission",
@@ -120,11 +120,30 @@ impl JmapClient {
         self.session.as_ref().ok_or(Error::NotAuthenticated)
     }
 
+    fn require_submission_capability(&self) -> Result<()> {
+        let session = self.session()?;
+
+        if !session.capabilities.contains_key("urn:ietf:params:jmap:submission") {
+            return Err(Error::Config(
+                "Email sending requires the 'urn:ietf:params:jmap:submission' capability. \
+                Your API token may be read-only. Generate a new token with send permissions \
+                at Fastmail Settings > Privacy & Security > Integrations > API tokens."
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     #[instrument(skip(self, method_calls))]
     async fn request(&self, method_calls: Vec<Value>) -> Result<Vec<Value>> {
         let session = self.session()?;
+        let available_capabilities: Vec<String> = DESIRED_CAPABILITIES
+            .iter()
+            .filter(|cap| session.capabilities.contains_key(**cap))
+            .map(|s| s.to_string())
+            .collect();
         let req = JmapRequest {
-            using: CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            using: available_capabilities,
             method_calls,
         };
 
@@ -144,7 +163,9 @@ impl JmapClient {
             _ => {}
         }
 
-        let jmap_resp: JmapResponse = resp.json().await?;
+        let body = resp.text().await?;
+        let jmap_resp: JmapResponse = serde_json::from_str(&body)
+            .map_err(|_| Error::Server(body.trim().to_string()))?;
         Ok(jmap_resp.method_responses)
     }
 
@@ -532,6 +553,8 @@ impl JmapClient {
         body: &str,
         in_reply_to: Option<&str>,
     ) -> Result<String> {
+        self.require_submission_capability()?;
+
         let account_id = self
             .session()?
             .primary_account_id()
@@ -758,6 +781,8 @@ impl JmapClient {
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
     ) -> Result<String> {
+        self.require_submission_capability()?;
+
         let account_id = self
             .session()?
             .primary_account_id()
@@ -952,6 +977,8 @@ impl JmapClient {
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
     ) -> Result<String> {
+        self.require_submission_capability()?;
+
         let account_id = self
             .session()?
             .primary_account_id()
@@ -1320,5 +1347,99 @@ impl JmapClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_session(capabilities: Vec<&str>) -> Session {
+        let mut caps = HashMap::new();
+        for cap in capabilities {
+            caps.insert(cap.to_string(), serde_json::json!({}));
+        }
+
+        let mut primary_accounts = HashMap::new();
+        primary_accounts.insert(
+            "urn:ietf:params:jmap:mail".to_string(),
+            "test-account".to_string(),
+        );
+
+        Session {
+            capabilities: caps,
+            accounts: HashMap::new(),
+            primary_accounts,
+            username: "test@example.com".to_string(),
+            api_url: "https://api.example.com/jmap".to_string(),
+            download_url: "https://api.example.com/download".to_string(),
+            upload_url: "https://api.example.com/upload".to_string(),
+            event_source_url: None,
+            state: None,
+        }
+    }
+
+    #[test]
+    fn test_require_submission_capability_succeeds_when_present() {
+        let mut client = JmapClient::new("test-token".to_string());
+        client.session = Some(create_test_session(vec![
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+        ]));
+
+        assert!(client.require_submission_capability().is_ok());
+    }
+
+    #[test]
+    fn test_require_submission_capability_fails_when_missing() {
+        let mut client = JmapClient::new("test-token".to_string());
+        client.session = Some(create_test_session(vec![
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+        ]));
+
+        let result = client.require_submission_capability();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("urn:ietf:params:jmap:submission"));
+        assert!(err_msg.contains("read-only"));
+    }
+
+    #[test]
+    fn test_require_submission_capability_fails_when_no_session() {
+        let client = JmapClient::new("test-token".to_string());
+
+        let result = client.require_submission_capability();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("Authentication required"));
+        assert!(!err_msg.contains("read-only"));
+    }
+
+    #[test]
+    fn test_desired_capabilities_filtered_by_session() {
+        assert!(DESIRED_CAPABILITIES.contains(&"urn:ietf:params:jmap:core"));
+        assert!(DESIRED_CAPABILITIES.contains(&"urn:ietf:params:jmap:mail"));
+        assert!(DESIRED_CAPABILITIES.contains(&"urn:ietf:params:jmap:submission"));
+        assert!(DESIRED_CAPABILITIES.contains(&"https://www.fastmail.com/dev/maskedemail"));
+
+        let session_caps = vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"];
+        let session = create_test_session(session_caps);
+
+        let filtered: Vec<String> = DESIRED_CAPABILITIES
+            .iter()
+            .filter(|cap| session.capabilities.contains_key(**cap))
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.contains(&"urn:ietf:params:jmap:core".to_string()));
+        assert!(filtered.contains(&"urn:ietf:params:jmap:mail".to_string()));
+        assert!(!filtered.contains(&"urn:ietf:params:jmap:submission".to_string()));
     }
 }
