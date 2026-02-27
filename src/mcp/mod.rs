@@ -126,6 +126,9 @@ pub struct SendEmailRequest {
     /// BCC recipients (hidden), comma-separated
     #[serde(default)]
     pub bcc: Option<String>,
+    /// Send from a specific identity/email address. Optional - uses default identity if not specified.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -145,6 +148,9 @@ pub struct ReplyEmailRequest {
     /// BCC recipients (hidden), comma-separated
     #[serde(default)]
     pub bcc: Option<String>,
+    /// Send from a specific identity/email address. Optional - uses default identity if not specified.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -164,6 +170,9 @@ pub struct ForwardEmailRequest {
     /// BCC recipients (hidden), comma-separated
     #[serde(default)]
     pub bcc: Option<String>,
+    /// Send from a specific identity/email address. Optional - uses default identity if not specified.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -263,6 +272,35 @@ impl FastmailMcp {
                 Self::text_result(text)
             }
             Err(e) => Self::error_result(format!("Failed to list mailboxes: {}", e)),
+        }
+    }
+
+    #[tool(
+        description = "List all sender identities on the account. Use this to find valid email addresses for the 'from' parameter in send_email, reply_to_email, and forward_email."
+    )]
+    async fn list_identities(&self) -> ToolResult {
+        let client = self.client.lock().await;
+        match client.list_identities().await {
+            Ok(identities) => {
+                if identities.is_empty() {
+                    return Self::text_result("No identities found.");
+                }
+                let text = identities
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| {
+                        let display_name = if id.name.is_empty() {
+                            "(unnamed)"
+                        } else {
+                            &id.name
+                        };
+                        format!("{}. {} <{}>", i + 1, display_name, id.email,)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Self::text_result(format!("Identities ({}):\n\n{}", identities.len(), text))
+            }
+            Err(e) => Self::error_result(format!("Failed to list identities: {}", e)),
         }
     }
 
@@ -547,6 +585,7 @@ impl FastmailMcp {
                 &req.subject,
                 &req.body,
                 None,
+                req.from.as_deref(),
             )
             .await
         {
@@ -634,7 +673,14 @@ impl FastmailMcp {
         }
 
         match client
-            .reply_email(&original, &req.body, reply_all, cc_addrs, bcc_addrs)
+            .reply_email(
+                &original,
+                &req.body,
+                reply_all,
+                cc_addrs,
+                bcc_addrs,
+                req.from.as_deref(),
+            )
             .await
         {
             Ok(email_id) => Self::text_result(format!(
@@ -734,7 +780,14 @@ impl FastmailMcp {
         }
 
         match client
-            .forward_email(&original, to_addrs.clone(), body, cc_addrs, bcc_addrs)
+            .forward_email(
+                &original,
+                to_addrs.clone(),
+                body,
+                cc_addrs,
+                bcc_addrs,
+                req.from.as_deref(),
+            )
             .await
         {
             Ok(email_id) => Self::text_result(format!(

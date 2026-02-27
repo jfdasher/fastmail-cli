@@ -26,3 +26,10 @@ pub async fn list_emails(mailbox: &str, limit: u32) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+pub async fn list_identities() -> anyhow::Result<()> {
+    let client = authenticated_client().await?;
+    let identities = client.list_identities().await?;
+    Output::success(identities).print();
+    Ok(())
+}

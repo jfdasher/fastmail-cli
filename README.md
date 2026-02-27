@@ -6,7 +6,7 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 
 | Feature               | Description                                                            |
 | --------------------- | ---------------------------------------------------------------------- |
-| **Email**             | List, search, read, send, reply, forward, threads                      |
+| **Email**             | List, search, read, send, reply, forward, threads, identity selection  |
 | **Mailboxes**         | List folders, move emails, mark spam/read                              |
 | **Contacts**          | Search contacts via CardDAV                                            |
 | **Attachments**       | Download files, extract text, resize images                            |
@@ -128,6 +128,14 @@ fastmail-cli search --from "boss" --has-attachment --after 2024-06-01 --limit 20
 
 Available flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`, `--before`, `--after`, `--unread`, `--flagged`
 
+### List Identities
+
+View available sender identities (useful for `--from`):
+
+```bash
+fastmail-cli list identities
+```
+
 ### Send Email
 
 ```bash
@@ -141,6 +149,13 @@ fastmail-cli send \
   --to "alice@example.com" \
   --cc "bob@example.com" \
   --bcc "secret@example.com" \
+  --subject "Hello" \
+  --body "Message"
+
+# Send from a specific identity/alias
+fastmail-cli send \
+  --to "alice@example.com" \
+  --from "alias@yourdomain.com" \
   --subject "Hello" \
   --body "Message"
 ```
@@ -211,6 +226,9 @@ fastmail-cli reply EMAIL_ID --body "Thanks everyone" --all
 
 # Reply with additional CC/BCC
 fastmail-cli reply EMAIL_ID --body "Response" --cc "boss@example.com"
+
+# Reply from a specific identity
+fastmail-cli reply EMAIL_ID --body "Thanks" --from "alias@yourdomain.com"
 ```
 
 ### Forward Email
@@ -219,6 +237,12 @@ fastmail-cli reply EMAIL_ID --body "Response" --cc "boss@example.com"
 fastmail-cli forward EMAIL_ID \
   --to "colleague@example.com" \
   --body "FYI - see below"
+
+# Forward from a specific identity
+fastmail-cli forward EMAIL_ID \
+  --to "colleague@example.com" \
+  --from "alias@yourdomain.com" \
+  --body "FYI"
 ```
 
 ### Shell Completions
@@ -328,11 +352,12 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 
 Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
 
-The MCP server exposes 17 tools for email operations:
+The MCP server exposes 18 tools for email operations:
 
 - **Reading**: `list_mailboxes`, `list_emails`, `get_email`, `search_emails`
 - **Actions**: `move_email`, `mark_as_read`, `mark_as_spam`
-- **Sending**: `send_email`, `reply_to_email`, `forward_email` (preview/confirm flow)
+- **Sending**: `send_email`, `reply_to_email`, `forward_email` (preview/confirm flow, `--from` identity selection)
+- **Identities**: `list_identities`
 - **Attachments**: `list_attachments`, `get_attachment` (auto text extraction, image resizing)
 - **Contacts**: `search_contacts` (requires app password)
 - **Masked Email**: `list_masked_emails`, `create_masked_email`, `enable_masked_email`, `disable_masked_email`, `delete_masked_email`

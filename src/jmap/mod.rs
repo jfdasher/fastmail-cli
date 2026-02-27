@@ -80,6 +80,16 @@ struct JmapResponse {
     method_responses: Vec<Value>,
 }
 
+fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identity> {
+    match from {
+        Some(email) => identities
+            .into_iter()
+            .find(|i| i.email.eq_ignore_ascii_case(email))
+            .ok_or_else(|| Error::IdentityNotFoundForEmail(email.to_string())),
+        None => identities.into_iter().next().ok_or(Error::IdentityNotFound),
+    }
+}
+
 impl JmapClient {
     pub fn new(token: String) -> Self {
         let client = Client::builder()
@@ -546,6 +556,12 @@ impl JmapClient {
         Ok(resp.list)
     }
 
+    async fn resolve_identity(&self, from: Option<&str>) -> Result<Identity> {
+        let identities = self.list_identities().await?;
+        pick_identity(identities, from)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self, body))]
     pub async fn send_email(
         &self,
@@ -555,6 +571,7 @@ impl JmapClient {
         subject: &str,
         body: &str,
         in_reply_to: Option<&str>,
+        from: Option<&str>,
     ) -> Result<String> {
         self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
 
@@ -563,8 +580,7 @@ impl JmapClient {
             .primary_account_id()
             .ok_or_else(|| Error::Config("No primary account".into()))?;
 
-        let identities = self.list_identities().await?;
-        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+        let identity = self.resolve_identity(from).await?;
 
         let sent = self.find_mailbox("sent").await?;
 
@@ -783,6 +799,7 @@ impl JmapClient {
         reply_all: bool,
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
+        from: Option<&str>,
     ) -> Result<String> {
         self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
 
@@ -791,8 +808,7 @@ impl JmapClient {
             .primary_account_id()
             .ok_or_else(|| Error::Config("No primary account".into()))?;
 
-        let identities = self.list_identities().await?;
-        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+        let identity = self.resolve_identity(from).await?;
         let my_email = identity.email.to_lowercase();
 
         let sent = self.find_mailbox("sent").await?;
@@ -979,6 +995,7 @@ impl JmapClient {
         body: &str,
         cc: Vec<EmailAddress>,
         bcc: Vec<EmailAddress>,
+        from: Option<&str>,
     ) -> Result<String> {
         self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
 
@@ -987,8 +1004,7 @@ impl JmapClient {
             .primary_account_id()
             .ok_or_else(|| Error::Config("No primary account".into()))?;
 
-        let identities = self.list_identities().await?;
-        let identity = identities.first().ok_or(Error::IdentityNotFound)?;
+        let identity = self.resolve_identity(from).await?;
 
         let sent = self.find_mailbox("sent").await?;
 
@@ -1441,5 +1457,67 @@ mod tests {
             client.require_capability("https://www.fastmail.com/dev/maskedemail", "Masked email");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("maskedemail"));
+    }
+
+    fn test_identity(id: &str, email: &str, name: &str) -> Identity {
+        Identity {
+            id: id.to_string(),
+            name: name.to_string(),
+            email: email.to_string(),
+            reply_to: None,
+            bcc: None,
+            html_signature: None,
+            text_signature: None,
+            may_delete: true,
+        }
+    }
+
+    #[test]
+    fn test_pick_identity_none_returns_first() {
+        let identities = vec![
+            test_identity("id1", "alice@example.com", "Alice"),
+            test_identity("id2", "bob@example.com", "Bob"),
+        ];
+        let result = pick_identity(identities, None).unwrap();
+        assert_eq!(result.email, "alice@example.com");
+    }
+
+    #[test]
+    fn test_pick_identity_none_empty_list() {
+        let result = pick_identity(vec![], None);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Identity not found")
+        );
+    }
+
+    #[test]
+    fn test_pick_identity_matches_exact() {
+        let identities = vec![
+            test_identity("id1", "alice@example.com", "Alice"),
+            test_identity("id2", "bob@example.com", "Bob"),
+        ];
+        let result = pick_identity(identities, Some("bob@example.com")).unwrap();
+        assert_eq!(result.id, "id2");
+    }
+
+    #[test]
+    fn test_pick_identity_case_insensitive() {
+        let identities = vec![test_identity("id1", "Alice@Example.COM", "Alice")];
+        let result = pick_identity(identities, Some("alice@example.com")).unwrap();
+        assert_eq!(result.id, "id1");
+    }
+
+    #[test]
+    fn test_pick_identity_not_found() {
+        let identities = vec![test_identity("id1", "alice@example.com", "Alice")];
+        let result = pick_identity(identities, Some("nobody@example.com"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nobody@example.com"));
+        assert!(err.contains("list identities"));
     }
 }
