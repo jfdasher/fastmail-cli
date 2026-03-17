@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.8.1] - 2026-03-17
+
+### Added
+
+- `CLAUDE.md` with condensed CLI reference for Claude Code (no MCP needed)
+- Claude Code users get direct CLI access without MCP tool schema overhead
+
+### Changed
+
+- README reorganized: "AI Integration" section covers both Claude Code (CLAUDE.md) and Claude Desktop (MCP)
+
 ## [1.8.0] - 2026-02-27
 
 ### Added

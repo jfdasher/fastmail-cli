@@ -13,7 +13,8 @@ CLI for Fastmail's JMAP API. Read, search, send, and manage emails from your ter
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
 | **Masked Email**      | Create, list, enable/disable aliases                                   |
-| **MCP Server**        | Claude integration via Model Context Protocol                          |
+| **MCP Server**        | Claude Desktop integration via Model Context Protocol                  |
+| **Claude Code**       | CLAUDE.md with CLI instructions (no MCP overhead)                      |
 | **Shell Completions** | Bash, Zsh, Fish, PowerShell                                            |
 | **JSON Output**       | All commands output JSON for scripting                                 |
 
@@ -324,15 +325,21 @@ fastmail-cli list emails | jq '.data.emails[].subject'
 fastmail-cli get EMAIL_ID | jq -r '.data.bodyValues | to_entries[0].value.value'
 ```
 
-## MCP Server (Claude Integration)
+## AI Integration
 
-Run as an MCP server for use with Claude Desktop or other MCP clients:
+### Claude Code
+
+The repo includes a `CLAUDE.md` with a condensed CLI reference. Claude Code reads it automatically and runs `fastmail-cli` commands directly via bash — no MCP server needed, no context bloat from tool schemas.
+
+### Claude Desktop (MCP Server)
+
+For Claude Desktop and other MCP clients that can't run bash, use the MCP server:
 
 ```bash
 fastmail-cli mcp
 ```
 
-Configure in Claude Desktop's `claude_desktop_config.json`:
+Configure in `claude_desktop_config.json`:
 
 ```json
 {
@@ -350,9 +357,9 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 }
 ```
 
-Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
+Username and app password are optional — only needed for contact search (CardDAV requires app password, API tokens don't work).
 
-The MCP server exposes 18 tools for email operations:
+The MCP server exposes 18 tools:
 
 - **Reading**: `list_mailboxes`, `list_emails`, `get_email`, `search_emails`
 - **Actions**: `move_email`, `mark_as_read`, `mark_as_spam`
@@ -361,8 +368,6 @@ The MCP server exposes 18 tools for email operations:
 - **Attachments**: `list_attachments`, `get_attachment` (auto text extraction, image resizing)
 - **Contacts**: `search_contacts` (requires app password)
 - **Masked Email**: `list_masked_emails`, `create_masked_email`, `enable_masked_email`, `disable_masked_email`, `delete_masked_email`
-
-Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 
 ## Debug Logging
 
