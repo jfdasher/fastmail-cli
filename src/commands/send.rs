@@ -1,4 +1,4 @@
-use crate::jmap::authenticated_client;
+use crate::jmap::{ComposeParams, authenticated_client};
 use crate::models::Output;
 use crate::util::parse_addresses;
 
@@ -6,27 +6,27 @@ pub async fn send(
     to: &str,
     subject: &str,
     body: &str,
-    cc: Option<&str>,
-    bcc: Option<&str>,
     reply_to: Option<&str>,
-    from: Option<&str>,
+    params: ComposeParams<'_>,
 ) -> anyhow::Result<()> {
     let client = authenticated_client().await?;
-
-    let to_addrs = parse_addresses(to);
-    let cc_addrs = cc.map(parse_addresses).unwrap_or_default();
-    let bcc_addrs = bcc.map(parse_addresses).unwrap_or_default();
+    let draft = params.draft;
 
     let email_id = client
-        .send_email(to_addrs, cc_addrs, bcc_addrs, subject, body, reply_to, from)
+        .send_email(parse_addresses(to), subject, body, reply_to, params)
         .await?;
 
     #[derive(serde::Serialize)]
     struct SendResponse {
         email_id: String,
+        status: &'static str,
     }
 
-    Output::success(SendResponse { email_id }).print();
+    Output::success(SendResponse {
+        email_id,
+        status: if draft { "draft" } else { "sent" },
+    })
+    .print();
 
     Ok(())
 }

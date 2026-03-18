@@ -25,6 +25,19 @@ type ToolResult = std::result::Result<CallToolResult, McpError>;
 mod format;
 use format::*;
 
+// ============ Shared Types ============
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SendAction {
+    /// Preview the email before sending
+    Preview,
+    /// Send the email
+    Confirm,
+    /// Save as draft without sending
+    Draft,
+}
+
 // ============ Request Types ============
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -112,8 +125,8 @@ pub struct MarkAsSpamRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendEmailRequest {
-    /// 'preview' to see the draft, 'confirm' to send - ALWAYS preview first
-    pub action: String,
+    /// 'preview' to see the draft, 'confirm' to send, 'draft' to save as draft without sending - ALWAYS preview first
+    pub action: SendAction,
     /// Recipient email address(es), comma-separated
     pub to: String,
     /// Email subject line
@@ -133,8 +146,8 @@ pub struct SendEmailRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReplyEmailRequest {
-    /// 'preview' to see the draft, 'confirm' to send - ALWAYS preview first
-    pub action: String,
+    /// 'preview' to see the draft, 'confirm' to send, 'draft' to save as draft without sending - ALWAYS preview first
+    pub action: SendAction,
     /// The email ID to reply to
     pub email_id: String,
     /// Reply body text (your response, without quoting original)
@@ -155,8 +168,8 @@ pub struct ReplyEmailRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ForwardEmailRequest {
-    /// 'preview' to see the draft, 'confirm' to send - ALWAYS preview first
-    pub action: String,
+    /// 'preview' to see the draft, 'confirm' to send, 'draft' to save as draft without sending - ALWAYS preview first
+    pub action: SendAction,
     /// The email ID to forward
     pub email_id: String,
     /// Recipient email address(es), comma-separated
@@ -534,7 +547,7 @@ impl FastmailMcp {
     // ============ Send/Reply/Forward Tools ============
 
     #[tool(
-        description = "Compose and send a new email. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm'. NEVER skip the preview step."
+        description = "Compose and send a new email. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm' to send or action='draft' to save as a draft without sending. NEVER skip the preview step."
     )]
     async fn send_email(&self, Parameters(req): Parameters<SendEmailRequest>) -> ToolResult {
         let to_addrs = parse_addresses(&req.to);
@@ -549,7 +562,7 @@ impl FastmailMcp {
             .map(|s| parse_addresses(s))
             .unwrap_or_default();
 
-        if req.action == "preview" {
+        if matches!(req.action, SendAction::Preview) {
             return Self::text_result(format!(
                 "EMAIL PREVIEW - Review before sending:\n\n\
                 To: {}\n\
@@ -559,7 +572,8 @@ impl FastmailMcp {
                 --- Body ---\n\
                 {}\n\n\
                 ---\n\
-                To send this email, call this tool again with action: \"confirm\" and the same parameters.",
+                To send this email, call this tool again with action: \"confirm\" and the same parameters.\n\
+                To save as draft without sending, use action: \"draft\".",
                 format_address_list(Some(&to_addrs)),
                 if cc_addrs.is_empty() {
                     "(none)".to_string()
@@ -576,34 +590,43 @@ impl FastmailMcp {
             ));
         }
 
+        let draft = matches!(req.action, SendAction::Draft);
         let client = self.client.lock().await;
         match client
             .send_email(
                 to_addrs.clone(),
-                cc_addrs,
-                bcc_addrs,
                 &req.subject,
                 &req.body,
                 None,
-                req.from.as_deref(),
+                crate::jmap::ComposeParams {
+                    cc: cc_addrs,
+                    bcc: bcc_addrs,
+                    from: req.from.as_deref(),
+                    draft,
+                },
             )
             .await
         {
             Ok(email_id) => Self::text_result(format!(
-                "Email sent successfully!\n\
+                "Email {} successfully!\n\
                 To: {}\n\
                 Subject: {}\n\
                 Email ID: {}",
+                if draft { "saved as draft" } else { "sent" },
                 format_address_list(Some(&to_addrs)),
                 req.subject,
                 email_id
             )),
-            Err(e) => Self::error_result(format!("Failed to send email: {}", e)),
+            Err(e) => Self::error_result(format!(
+                "Failed to {} email: {}",
+                if draft { "draft" } else { "send" },
+                e
+            )),
         }
     }
 
     #[tool(
-        description = "Reply to an existing email thread. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm'. NEVER skip the preview step. For reply-all, set all=true."
+        description = "Reply to an existing email thread. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm' to send or action='draft' to save as a draft without sending. NEVER skip the preview step. For reply-all, set all=true."
     )]
     async fn reply_to_email(&self, Parameters(req): Parameters<ReplyEmailRequest>) -> ToolResult {
         let client = self.client.lock().await;
@@ -639,7 +662,7 @@ impl FastmailMcp {
         // Determine recipients
         let to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
 
-        if req.action == "preview" {
+        if matches!(req.action, SendAction::Preview) {
             return Self::text_result(format!(
                 "REPLY PREVIEW - Review before sending:\n\n\
                 To: {}\n\
@@ -650,7 +673,8 @@ impl FastmailMcp {
                 --- Your Reply ---\n\
                 {}\n\n\
                 ---\n\
-                To send this reply, call this tool again with action: \"confirm\" and the same parameters.",
+                To send this reply, call this tool again with action: \"confirm\" and the same parameters.\n\
+                To save as draft without sending, use action: \"draft\".",
                 format_address_list(Some(&to_addrs)),
                 if cc_addrs.is_empty() {
                     "(none)".to_string()
@@ -672,32 +696,41 @@ impl FastmailMcp {
             ));
         }
 
+        let draft = matches!(req.action, SendAction::Draft);
         match client
             .reply_email(
                 &original,
                 &req.body,
                 reply_all,
-                cc_addrs,
-                bcc_addrs,
-                req.from.as_deref(),
+                crate::jmap::ComposeParams {
+                    cc: cc_addrs,
+                    bcc: bcc_addrs,
+                    from: req.from.as_deref(),
+                    draft,
+                },
             )
             .await
         {
             Ok(email_id) => Self::text_result(format!(
-                "Reply sent successfully!\n\
+                "Reply {} successfully!\n\
                 To: {}\n\
                 Subject: {}\n\
                 Email ID: {}",
+                if draft { "saved as draft" } else { "sent" },
                 format_address_list(Some(&to_addrs)),
                 subject,
                 email_id
             )),
-            Err(e) => Self::error_result(format!("Failed to send reply: {}", e)),
+            Err(e) => Self::error_result(format!(
+                "Failed to {} reply: {}",
+                if draft { "draft" } else { "send" },
+                e
+            )),
         }
     }
 
     #[tool(
-        description = "Forward an email to new recipients. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm'. NEVER skip the preview step."
+        description = "Forward an email to new recipients. CRITICAL: You MUST call with action='preview' first, show the user the draft, get explicit approval, then call again with action='confirm' to send or action='draft' to save as a draft without sending. NEVER skip the preview step."
     )]
     async fn forward_email(&self, Parameters(req): Parameters<ForwardEmailRequest>) -> ToolResult {
         let client = self.client.lock().await;
@@ -741,7 +774,7 @@ impl FastmailMcp {
 
         let sender = format_address_list(original.from.as_ref());
 
-        if req.action == "preview" {
+        if matches!(req.action, SendAction::Preview) {
             return Self::text_result(format!(
                 "FORWARD PREVIEW - Review before sending:\n\n\
                 To: {}\n\
@@ -757,7 +790,8 @@ impl FastmailMcp {
                 Subject: {}\n\n\
                 {}\n\n\
                 ---\n\
-                To send this forward, call this tool again with action: \"confirm\" and the same parameters.",
+                To send this forward, call this tool again with action: \"confirm\" and the same parameters.\n\
+                To save as draft without sending, use action: \"draft\".",
                 format_address_list(Some(&to_addrs)),
                 if cc_addrs.is_empty() {
                     "(none)".to_string()
@@ -779,27 +813,36 @@ impl FastmailMcp {
             ));
         }
 
+        let draft = matches!(req.action, SendAction::Draft);
         match client
             .forward_email(
                 &original,
                 to_addrs.clone(),
                 body,
-                cc_addrs,
-                bcc_addrs,
-                req.from.as_deref(),
+                crate::jmap::ComposeParams {
+                    cc: cc_addrs,
+                    bcc: bcc_addrs,
+                    from: req.from.as_deref(),
+                    draft,
+                },
             )
             .await
         {
             Ok(email_id) => Self::text_result(format!(
-                "Email forwarded successfully!\n\
+                "Forward {} successfully!\n\
                 To: {}\n\
                 Subject: {}\n\
                 Email ID: {}",
+                if draft { "saved as draft" } else { "sent" },
                 format_address_list(Some(&to_addrs)),
                 subject,
                 email_id
             )),
-            Err(e) => Self::error_result(format!("Failed to forward email: {}", e)),
+            Err(e) => Self::error_result(format!(
+                "Failed to {} forward: {}",
+                if draft { "draft" } else { "send" },
+                e
+            )),
         }
     }
 

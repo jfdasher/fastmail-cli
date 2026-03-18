@@ -34,6 +34,74 @@ pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
     Ok(client)
 }
 
+/// Common parameters for compose operations (send, reply, forward)
+pub struct ComposeParams<'a> {
+    pub cc: Vec<EmailAddress>,
+    pub bcc: Vec<EmailAddress>,
+    pub from: Option<&'a str>,
+    pub draft: bool,
+}
+
+/// Resolved context for a compose operation
+struct ComposeContext {
+    account_id: String,
+    mailbox: Mailbox,
+    identity: Option<Identity>,
+    draft: bool,
+}
+
+impl ComposeContext {
+    fn apply_to_email(&self, email_create: &mut HashMap<String, Value>) {
+        email_create.insert(
+            "mailboxIds".into(),
+            json!({ self.mailbox.id.clone(): true }),
+        );
+        if self.draft {
+            email_create.insert("keywords".into(), json!({ "$draft": true, "$seen": true }));
+        }
+        if let Some(ref identity) = self.identity {
+            email_create.insert(
+                "from".into(),
+                json!([{ "email": identity.email, "name": identity.name }]),
+            );
+        }
+    }
+
+    fn build_method_calls(&self, email_create: HashMap<String, Value>) -> Vec<Value> {
+        let mut calls = vec![json!([
+            "Email/set",
+            {
+                "accountId": self.account_id,
+                "create": { "email": email_create }
+            },
+            "e0"
+        ])];
+        if !self.draft
+            && let Some(ref identity) = self.identity
+        {
+            calls.push(json!([
+                "EmailSubmission/set",
+                {
+                    "accountId": self.account_id,
+                    "create": {
+                        "submission": {
+                            "identityId": identity.id,
+                            "emailId": "#email"
+                        }
+                    },
+                    "onSuccessUpdateEmail": {
+                        "#submission": {
+                            "keywords/$seen": true
+                        }
+                    }
+                },
+                "s0"
+            ]));
+        }
+        calls
+    }
+}
+
 // Shared JMAP response types used across multiple methods
 #[derive(Deserialize)]
 struct GetResponse<T> {
@@ -561,108 +629,34 @@ impl JmapClient {
         pick_identity(identities, from)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, body))]
-    pub async fn send_email(
-        &self,
-        to: Vec<EmailAddress>,
-        cc: Vec<EmailAddress>,
-        bcc: Vec<EmailAddress>,
-        subject: &str,
-        body: &str,
-        in_reply_to: Option<&str>,
-        from: Option<&str>,
-    ) -> Result<String> {
-        self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
-
+    async fn prepare_compose(&self, from: Option<&str>, draft: bool) -> Result<ComposeContext> {
+        if !draft {
+            self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
+        }
         let account_id = self
             .session()?
             .primary_account_id()
-            .ok_or_else(|| Error::Config("No primary account".into()))?;
+            .ok_or_else(|| Error::Config("No primary account".into()))?
+            .to_string();
+        let mailbox = if draft {
+            self.find_mailbox("drafts").await?
+        } else {
+            self.find_mailbox("sent").await?
+        };
+        let identity = match self.resolve_identity(from).await {
+            Ok(id) => Some(id),
+            Err(_) if draft => None,
+            Err(e) => return Err(e),
+        };
+        Ok(ComposeContext {
+            account_id,
+            mailbox,
+            identity,
+            draft,
+        })
+    }
 
-        let identity = self.resolve_identity(from).await?;
-
-        let sent = self.find_mailbox("sent").await?;
-
-        let mut email_create: HashMap<String, Value> = HashMap::new();
-        // Create directly in Sent - no draft needed
-        email_create.insert("mailboxIds".into(), json!({ sent.id.clone(): true }));
-        email_create.insert(
-            "from".into(),
-            json!([{ "email": identity.email, "name": identity.name }]),
-        );
-        email_create.insert(
-            "to".into(),
-            json!(
-                to.iter()
-                    .map(|a| json!({"email": a.email, "name": a.name}))
-                    .collect::<Vec<_>>()
-            ),
-        );
-        if !cc.is_empty() {
-            email_create.insert(
-                "cc".into(),
-                json!(
-                    cc.iter()
-                        .map(|a| json!({"email": a.email, "name": a.name}))
-                        .collect::<Vec<_>>()
-                ),
-            );
-        }
-        if !bcc.is_empty() {
-            email_create.insert(
-                "bcc".into(),
-                json!(
-                    bcc.iter()
-                        .map(|a| json!({"email": a.email, "name": a.name}))
-                        .collect::<Vec<_>>()
-                ),
-            );
-        }
-        email_create.insert("subject".into(), json!(subject));
-        email_create.insert(
-            "bodyValues".into(),
-            json!({ "body": { "value": body, "charset": "utf-8" } }),
-        );
-        email_create.insert(
-            "textBody".into(),
-            json!([{ "partId": "body", "type": "text/plain" }]),
-        );
-        if let Some(reply_id) = in_reply_to {
-            email_create.insert("inReplyTo".into(), json!([reply_id]));
-        }
-
-        let responses = self
-            .request(vec![
-                json!([
-                    "Email/set",
-                    {
-                        "accountId": account_id,
-                        "create": { "email": email_create }
-                    },
-                    "e0"
-                ]),
-                json!([
-                    "EmailSubmission/set",
-                    {
-                        "accountId": account_id,
-                        "create": {
-                            "submission": {
-                                "identityId": identity.id,
-                                "emailId": "#email"
-                            }
-                        },
-                        "onSuccessUpdateEmail": {
-                            "#submission": {
-                                "keywords/$seen": true
-                            }
-                        }
-                    },
-                    "s0"
-                ]),
-            ])
-            .await?;
-
+    fn parse_email_create_response(responses: &[Value]) -> Result<String> {
         let email_resp: EmailSetResponse =
             Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
 
@@ -684,7 +678,7 @@ impl JmapClient {
             });
         }
 
-        let email_id = email_resp
+        email_resp
             .created
             .and_then(|c: HashMap<String, Value>| c.get("email").cloned())
             .and_then(|d: Value| {
@@ -696,9 +690,71 @@ impl JmapClient {
                 method: "Email/set".into(),
                 error_type: "unknown".into(),
                 description: "No email ID returned".into(),
-            })?;
+            })
+    }
 
-        debug!(email_id = %email_id, "Email sent successfully");
+    #[instrument(skip(self, body, params))]
+    pub async fn send_email(
+        &self,
+        to: Vec<EmailAddress>,
+        subject: &str,
+        body: &str,
+        in_reply_to: Option<&str>,
+        params: ComposeParams<'_>,
+    ) -> Result<String> {
+        let ctx = self.prepare_compose(params.from, params.draft).await?;
+
+        let mut email_create: HashMap<String, Value> = HashMap::new();
+        ctx.apply_to_email(&mut email_create);
+        email_create.insert(
+            "to".into(),
+            json!(
+                to.iter()
+                    .map(|a| json!({"email": a.email, "name": a.name}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        if !params.cc.is_empty() {
+            email_create.insert(
+                "cc".into(),
+                json!(
+                    params
+                        .cc
+                        .iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        if !params.bcc.is_empty() {
+            email_create.insert(
+                "bcc".into(),
+                json!(
+                    params
+                        .bcc
+                        .iter()
+                        .map(|a| json!({"email": a.email, "name": a.name}))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        email_create.insert("subject".into(), json!(subject));
+        email_create.insert(
+            "bodyValues".into(),
+            json!({ "body": { "value": body, "charset": "utf-8" } }),
+        );
+        email_create.insert(
+            "textBody".into(),
+            json!([{ "partId": "body", "type": "text/plain" }]),
+        );
+        if let Some(reply_id) = in_reply_to {
+            email_create.insert("inReplyTo".into(), json!([reply_id]));
+        }
+
+        let responses = self.request(ctx.build_method_calls(email_create)).await?;
+        let email_id = Self::parse_email_create_response(&responses)?;
+
+        debug!(email_id = %email_id, draft = params.draft, "Email created successfully");
         Ok(email_id)
     }
 
@@ -791,27 +847,22 @@ impl JmapClient {
     }
 
     /// Send a reply to an existing email with proper threading headers
-    #[instrument(skip(self, body))]
+    #[instrument(skip(self, body, params))]
     pub async fn reply_email(
         &self,
         original: &Email,
         body: &str,
         reply_all: bool,
-        cc: Vec<EmailAddress>,
-        bcc: Vec<EmailAddress>,
-        from: Option<&str>,
+        params: ComposeParams<'_>,
     ) -> Result<String> {
-        self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
+        let ctx = self.prepare_compose(params.from, params.draft).await?;
 
-        let account_id = self
-            .session()?
-            .primary_account_id()
-            .ok_or_else(|| Error::Config("No primary account".into()))?;
-
-        let identity = self.resolve_identity(from).await?;
-        let my_email = identity.email.to_lowercase();
-
-        let sent = self.find_mailbox("sent").await?;
+        let my_email = ctx
+            .identity
+            .as_ref()
+            .map(|i| i.email.to_lowercase())
+            .or_else(|| params.from.map(|f| f.to_lowercase()))
+            .unwrap_or_default();
 
         // Build To: reply to sender, or if reply_all, include original recipients
         let mut to_addrs: Vec<EmailAddress> = original.from.clone().unwrap_or_default();
@@ -820,7 +871,7 @@ impl JmapClient {
             // Add original To recipients (except ourselves)
             if let Some(ref orig_to) = original.to {
                 for addr in orig_to {
-                    if addr.email.to_lowercase() != my_email {
+                    if my_email.is_empty() || addr.email.to_lowercase() != my_email {
                         to_addrs.push(addr.clone());
                     }
                 }
@@ -828,10 +879,10 @@ impl JmapClient {
         }
 
         // Build CC: include original CC recipients (if reply_all) plus any new CC
-        let mut cc_addrs = cc;
+        let mut cc_addrs = params.cc;
         if reply_all && let Some(ref orig_cc) = original.cc {
             for addr in orig_cc {
-                if addr.email.to_lowercase() != my_email {
+                if my_email.is_empty() || addr.email.to_lowercase() != my_email {
                     cc_addrs.push(addr.clone());
                 }
             }
@@ -862,12 +913,7 @@ impl JmapClient {
         };
 
         let mut email_create: HashMap<String, Value> = HashMap::new();
-        // Create directly in Sent - no draft needed
-        email_create.insert("mailboxIds".into(), json!({ sent.id.clone(): true }));
-        email_create.insert(
-            "from".into(),
-            json!([{ "email": identity.email, "name": identity.name }]),
-        );
+        ctx.apply_to_email(&mut email_create);
         email_create.insert(
             "to".into(),
             json!(
@@ -888,11 +934,13 @@ impl JmapClient {
                 ),
             );
         }
-        if !bcc.is_empty() {
+        if !params.bcc.is_empty() {
             email_create.insert(
                 "bcc".into(),
                 json!(
-                    bcc.iter()
+                    params
+                        .bcc
+                        .iter()
                         .map(|a| json!({"email": a.email, "name": a.name}))
                         .collect::<Vec<_>>()
                 ),
@@ -916,97 +964,23 @@ impl JmapClient {
             email_create.insert("references".into(), json!(references));
         }
 
-        let responses = self
-            .request(vec![
-                json!([
-                    "Email/set",
-                    {
-                        "accountId": account_id,
-                        "create": { "email": email_create }
-                    },
-                    "e0"
-                ]),
-                json!([
-                    "EmailSubmission/set",
-                    {
-                        "accountId": account_id,
-                        "create": {
-                            "submission": {
-                                "identityId": identity.id,
-                                "emailId": "#email"
-                            }
-                        },
-                        "onSuccessUpdateEmail": {
-                            "#submission": {
-                                "keywords/$seen": true
-                            }
-                        }
-                    },
-                    "s0"
-                ]),
-            ])
-            .await?;
+        let responses = self.request(ctx.build_method_calls(email_create)).await?;
+        let email_id = Self::parse_email_create_response(&responses)?;
 
-        let email_resp: EmailSetResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
-
-        if let Some(ref not_created) = email_resp.not_created
-            && let Some(err) = not_created.get("email")
-        {
-            let error_type = err
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = err
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("Failed to create email");
-            return Err(Error::Jmap {
-                method: "Email/set".into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
-        }
-
-        let email_id = email_resp
-            .created
-            .and_then(|c: HashMap<String, Value>| c.get("email").cloned())
-            .and_then(|d: Value| {
-                d.get("id")
-                    .and_then(|v: &Value| v.as_str())
-                    .map(String::from)
-            })
-            .ok_or_else(|| Error::Jmap {
-                method: "Email/set".into(),
-                error_type: "unknown".into(),
-                description: "No email ID returned".into(),
-            })?;
-
-        debug!(email_id = %email_id, "Reply sent successfully");
+        debug!(email_id = %email_id, draft = params.draft, "Reply created successfully");
         Ok(email_id)
     }
 
     /// Forward an email with proper attribution
-    #[instrument(skip(self, body))]
+    #[instrument(skip(self, body, params))]
     pub async fn forward_email(
         &self,
         original: &Email,
         to: Vec<EmailAddress>,
         body: &str,
-        cc: Vec<EmailAddress>,
-        bcc: Vec<EmailAddress>,
-        from: Option<&str>,
+        params: ComposeParams<'_>,
     ) -> Result<String> {
-        self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
-
-        let account_id = self
-            .session()?
-            .primary_account_id()
-            .ok_or_else(|| Error::Config("No primary account".into()))?;
-
-        let identity = self.resolve_identity(from).await?;
-
-        let sent = self.find_mailbox("sent").await?;
+        let ctx = self.prepare_compose(params.from, params.draft).await?;
 
         // Build subject with Fwd: prefix if not already present
         let subject = if original
@@ -1052,12 +1026,7 @@ impl JmapClient {
         );
 
         let mut email_create: HashMap<String, Value> = HashMap::new();
-        // Create directly in Sent - no draft needed
-        email_create.insert("mailboxIds".into(), json!({ sent.id.clone(): true }));
-        email_create.insert(
-            "from".into(),
-            json!([{ "email": identity.email, "name": identity.name }]),
-        );
+        ctx.apply_to_email(&mut email_create);
         email_create.insert(
             "to".into(),
             json!(
@@ -1066,21 +1035,25 @@ impl JmapClient {
                     .collect::<Vec<_>>()
             ),
         );
-        if !cc.is_empty() {
+        if !params.cc.is_empty() {
             email_create.insert(
                 "cc".into(),
                 json!(
-                    cc.iter()
+                    params
+                        .cc
+                        .iter()
                         .map(|a| json!({"email": a.email, "name": a.name}))
                         .collect::<Vec<_>>()
                 ),
             );
         }
-        if !bcc.is_empty() {
+        if !params.bcc.is_empty() {
             email_create.insert(
                 "bcc".into(),
                 json!(
-                    bcc.iter()
+                    params
+                        .bcc
+                        .iter()
                         .map(|a| json!({"email": a.email, "name": a.name}))
                         .collect::<Vec<_>>()
                 ),
@@ -1096,73 +1069,10 @@ impl JmapClient {
             json!([{ "partId": "body", "type": "text/plain" }]),
         );
 
-        let responses = self
-            .request(vec![
-                json!([
-                    "Email/set",
-                    {
-                        "accountId": account_id,
-                        "create": { "email": email_create }
-                    },
-                    "e0"
-                ]),
-                json!([
-                    "EmailSubmission/set",
-                    {
-                        "accountId": account_id,
-                        "create": {
-                            "submission": {
-                                "identityId": identity.id,
-                                "emailId": "#email"
-                            }
-                        },
-                        "onSuccessUpdateEmail": {
-                            "#submission": {
-                                "keywords/$seen": true
-                            }
-                        }
-                    },
-                    "s0"
-                ]),
-            ])
-            .await?;
+        let responses = self.request(ctx.build_method_calls(email_create)).await?;
+        let email_id = Self::parse_email_create_response(&responses)?;
 
-        let email_resp: EmailSetResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
-
-        if let Some(ref not_created) = email_resp.not_created
-            && let Some(err) = not_created.get("email")
-        {
-            let error_type = err
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = err
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("Failed to create email");
-            return Err(Error::Jmap {
-                method: "Email/set".into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
-        }
-
-        let email_id = email_resp
-            .created
-            .and_then(|c: HashMap<String, Value>| c.get("email").cloned())
-            .and_then(|d: Value| {
-                d.get("id")
-                    .and_then(|v: &Value| v.as_str())
-                    .map(String::from)
-            })
-            .ok_or_else(|| Error::Jmap {
-                method: "Email/set".into(),
-                error_type: "unknown".into(),
-                description: "No email ID returned".into(),
-            })?;
-
-        debug!(email_id = %email_id, "Forward sent successfully");
+        debug!(email_id = %email_id, draft = params.draft, "Forward created successfully");
         Ok(email_id)
     }
 
