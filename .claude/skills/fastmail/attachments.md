@@ -1,3 +1,8 @@
+---
+name: fastmail/attachments
+description: fastmail-cli download — save attachments or extract text content from emails
+---
+
 # fastmail-cli — Attachments
 
 ## Download Attachments

@@ -1,3 +1,8 @@
+---
+name: fastmail/conversations
+description: fastmail-cli list, get, thread — reading emails, conversations, mark-read, and triage
+---
+
 # fastmail-cli — Conversations & Email Reading
 
 ## Listing Emails

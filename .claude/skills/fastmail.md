@@ -1,3 +1,8 @@
+---
+name: fastmail
+description: Complete reference for fastmail-cli — all commands, flags, config, and common patterns
+---
+
 # fastmail-cli — Complete Reference
 
 fastmail-cli is a Rust CLI for Fastmail via JMAP (email) and CardDAV (contacts). All output is JSON: `{"success": true, "data": {...}}`.

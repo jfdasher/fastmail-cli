@@ -1,3 +1,8 @@
+---
+name: fastmail/search
+description: fastmail-cli search — all filter flags, date ranges, and search workflow patterns
+---
+
 # fastmail-cli — Search
 
 Search filters are ANDed together. All return JSON with a `data` array of email summaries.
