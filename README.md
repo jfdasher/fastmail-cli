@@ -324,6 +324,24 @@ fastmail-cli list emails | jq '.data.emails[].subject'
 fastmail-cli get EMAIL_ID | jq -r '.data.bodyValues | to_entries[0].value.value'
 ```
 
+## Claude Code Skills
+
+If you're using [Claude Code](https://claude.ai/claude-code), this repo ships skills that teach agents how to use the CLI — no need to explain flags or workflows manually.
+
+Copy the skills into your project's `.claude/skills/` directory (or anywhere Claude Code loads skills from), then invoke them:
+
+```
+/fastmail              # full command reference + common patterns
+/fastmail/search       # search filters, date ranges, workflows
+/fastmail/compose      # send, reply, forward, drafts, identities
+/fastmail/conversations # list, get, thread, mark-read, triage
+/fastmail/attachments  # download, raw vs json, text extraction
+/fastmail/masked       # masked email CRUD
+/fastmail/contacts     # CardDAV setup, list/search
+```
+
+Skills are in `.claude/skills/` in this repo. Each one includes concrete examples and agent-oriented workflow patterns.
+
 ## MCP Server (Claude Integration)
 
 Run as an MCP server for use with Claude Desktop or other MCP clients:
