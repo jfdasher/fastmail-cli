@@ -42,7 +42,8 @@ impl QueryRoot {
         Ok(emails.into_iter().map(Into::into).collect())
     }
 
-    /// Get full content of a specific email by ID.
+    /// Get full content of a specific email by ID. Includes nested attachments —
+    /// select `attachments { content { ... } }` to download attachment data in the same query.
     async fn email(
         &self,
         ctx: &Context<'_>,
@@ -57,7 +58,8 @@ impl QueryRoot {
         }
     }
 
-    /// Get all emails in a thread/conversation. Returns emails sorted oldest-first.
+    /// Get all emails in a thread/conversation with full content. Returns emails sorted
+    /// oldest-first. Each email has full body and nested attachment access.
     async fn thread(
         &self,
         ctx: &Context<'_>,
@@ -68,10 +70,7 @@ impl QueryRoot {
         let mut emails = client.get_thread(&email_id).await?;
         emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
         let total = emails.len();
-        Ok(GqlThread {
-            emails: emails.into_iter().map(Into::into).collect(),
-            total,
-        })
+        Ok(GqlThread { emails, total })
     }
 
     /// Search emails with flexible filters.
@@ -129,123 +128,40 @@ impl QueryRoot {
         Ok(emails.into_iter().map(Into::into).collect())
     }
 
-    /// List all sender identities on the account.
-    async fn identities(&self, ctx: &Context<'_>) -> Result<Vec<GqlIdentity>> {
-        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
-        let client = client.lock().await;
-        let identities = client.list_identities().await?;
-        Ok(identities.into_iter().map(GqlIdentity::from).collect())
-    }
-
-    /// List attachments on an email.
+    /// List attachment metadata for an email. Select `content` on each attachment to fetch data.
     async fn attachments(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID")] email_id: String,
-    ) -> Result<Vec<GqlAttachmentInfo>> {
+    ) -> Result<Vec<GqlAttachment>> {
         let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
         let client = client.lock().await;
         let email = client.get_email(&email_id).await?;
-        Ok(email
-            .attachments
-            .as_ref()
-            .map(|atts| {
-                atts.iter()
-                    .filter(|a| a.blob_id.is_some())
-                    .map(GqlAttachmentInfo::from)
-                    .collect()
-            })
-            .unwrap_or_default())
+        Ok(GqlEmail(email).make_attachments())
     }
 
-    /// Download an attachment. Images are resized and base64-encoded. Documents have text extracted.
+    /// Get a single attachment by blob ID. Select `content` to fetch its data.
     async fn attachment(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID the attachment belongs to")] email_id: String,
         #[graphql(desc = "The blob ID of the attachment (from attachments query)")] blob_id: String,
-    ) -> Result<GqlAttachmentContent> {
+    ) -> Result<Option<GqlAttachment>> {
         let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
         let client = client.lock().await;
-
         let email = client.get_email(&email_id).await?;
-        let attachment = email
-            .attachments
-            .as_ref()
-            .and_then(|atts| atts.iter().find(|a| a.blob_id.as_deref() == Some(&blob_id)));
+        Ok(GqlEmail(email)
+            .make_attachments()
+            .into_iter()
+            .find(|a| a.blob_id == blob_id))
+    }
 
-        let attachment = attachment
-            .ok_or_else(|| async_graphql::Error::new(format!("Attachment not found: {blob_id}")))?;
-
-        let content_type = attachment
-            .content_type
-            .as_deref()
-            .unwrap_or("application/octet-stream");
-        let name = attachment.name.as_deref().unwrap_or("attachment");
-
-        let data = client.download_blob(&blob_id).await?;
-
-        let mime = if crate::util::is_image(content_type, name) {
-            crate::util::infer_image_mime(name).unwrap_or(content_type)
-        } else {
-            content_type
-        };
-
-        // Images
-        if crate::util::is_image(mime, name) {
-            return match crate::util::resize_image(&data, mime, crate::util::MCP_IMAGE_MAX_BYTES) {
-                Ok((processed_data, _mime_type)) => {
-                    let base64_data = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &processed_data,
-                    );
-                    Ok(GqlAttachmentContent {
-                        blob_id,
-                        name: name.to_string(),
-                        content_type: mime.to_string(),
-                        size: processed_data.len(),
-                        base64_content: Some(base64_data),
-                        text_content: None,
-                        info: None,
-                    })
-                }
-                Err(e) => Err(async_graphql::Error::new(format!(
-                    "Failed to process image: {e}"
-                ))),
-            };
-        }
-
-        // Documents — extract text
-        match crate::util::extract_text(&data, name).await {
-            Ok(Some(text)) => {
-                return Ok(GqlAttachmentContent {
-                    blob_id,
-                    name: name.to_string(),
-                    content_type: content_type.to_string(),
-                    size: data.len(),
-                    base64_content: None,
-                    text_content: Some(text),
-                    info: None,
-                });
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return Err(async_graphql::Error::new(format!(
-                    "Failed to extract text: {e}"
-                )));
-            }
-        }
-
-        // Binary fallback
-        Ok(GqlAttachmentContent {
-            blob_id,
-            name: name.to_string(),
-            content_type: content_type.to_string(),
-            size: data.len(),
-            base64_content: None,
-            text_content: None,
-            info: Some("Binary attachment — cannot be displayed directly.".to_string()),
-        })
+    /// List all sender identities on the account. Includes signatures and default reply-to/bcc.
+    async fn identities(&self, ctx: &Context<'_>) -> Result<Vec<GqlIdentity>> {
+        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = client.lock().await;
+        let identities = client.list_identities().await?;
+        Ok(identities.into_iter().map(GqlIdentity::from).collect())
     }
 
     /// List all masked email addresses.

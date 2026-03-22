@@ -377,7 +377,43 @@ The MCP server exposes **2 tools** via a GraphQL interface:
 
 This replaces the previous 18 individual tools with a composable interface. The LLM fetches the schema once, then constructs exactly the queries it needs — fetching multiple resources in a single round-trip, requesting only the fields it wants, and using typed arguments for filtering and pagination.
 
-All previous operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities, attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
+### Nested resolution
+
+Queries support deep nesting so the LLM can get everything it needs in one hit:
+
+```graphql
+# Email with full attachment content in a single query
+{
+  email(id: "abc123") {
+    subject
+    from { name email }
+    textBody
+    attachments {
+      name
+      contentType
+      size
+      content { textContent base64Content }
+    }
+  }
+}
+
+# Entire thread with all emails and their attachments
+{
+  thread(emailId: "abc123") {
+    total
+    emails {
+      subject
+      from { email }
+      textBody
+      attachments { name size }
+    }
+  }
+}
+```
+
+Attachment `content` is lazily resolved — only fetched when the field is included in the query. Omit it for fast metadata-only listings.
+
+All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
 
 Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 

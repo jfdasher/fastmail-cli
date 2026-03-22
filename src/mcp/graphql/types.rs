@@ -1,9 +1,9 @@
 //! GraphQL type wrappers around existing model structs
 
-use async_graphql::{Enum, Object, SimpleObject};
+use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
-use crate::models::{Email, EmailAddress, EmailBodyPart, Identity, Mailbox, MaskedEmail};
+use crate::models::{Email, EmailAddress, Identity, Mailbox, MaskedEmail};
 
 // ============ Output Types ============
 
@@ -53,7 +53,7 @@ impl From<EmailAddress> for GqlEmailAddress {
     }
 }
 
-fn convert_addrs(addrs: Option<Vec<EmailAddress>>) -> Vec<GqlEmailAddress> {
+pub(crate) fn convert_addrs(addrs: Option<Vec<EmailAddress>>) -> Vec<GqlEmailAddress> {
     addrs
         .unwrap_or_default()
         .into_iter()
@@ -103,8 +103,31 @@ impl From<Email> for GqlEmailSummary {
     }
 }
 
-/// Full email with body content
+/// Full email with body content and nested attachment resolution
 pub struct GqlEmail(pub Email);
+
+impl GqlEmail {
+    /// Build attachment list from the inner email — shared by the nested resolver
+    /// and the top-level `attachments`/`attachment` queries.
+    pub fn make_attachments(&self) -> Vec<GqlAttachment> {
+        self.0
+            .attachments
+            .as_ref()
+            .map(|atts| {
+                atts.iter()
+                    .filter(|a| a.blob_id.is_some())
+                    .map(|a| GqlAttachment {
+                        blob_id: a.blob_id.clone().unwrap_or_default(),
+                        name: a.name.clone(),
+                        content_type: a.content_type.clone(),
+                        size: a.size,
+                        disposition: a.disposition.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
 
 #[Object(name = "Email")]
 impl GqlEmail {
@@ -176,28 +199,27 @@ impl GqlEmail {
     async fn html_body(&self) -> Option<&str> {
         self.0.html_content()
     }
-    /// Attachment metadata (use `attachments` query for full details)
-    async fn attachments(&self) -> Vec<GqlAttachmentInfo> {
-        self.0
-            .attachments
-            .as_ref()
-            .map(|atts| {
-                atts.iter()
-                    .filter(|a| a.blob_id.is_some())
-                    .map(GqlAttachmentInfo::from)
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// Attachments with metadata. Select `content` on an attachment to fetch its data (images
+    /// are base64-encoded, documents have text extracted). Content is lazily resolved — only
+    /// fetched when you include it in your query.
+    async fn attachments(&self) -> Vec<GqlAttachment> {
+        self.make_attachments()
     }
     /// Mailbox IDs this email belongs to
     async fn mailbox_ids(&self) -> Vec<String> {
         self.0.mailbox_ids.keys().cloned().collect()
     }
+
+    /// Keywords (flags) on this email: $seen, $flagged, $draft, $junk, etc.
+    async fn keywords(&self) -> Vec<String> {
+        self.0.keywords.keys().cloned().collect()
+    }
 }
 
-#[derive(SimpleObject)]
-#[graphql(name = "AttachmentInfo")]
-pub struct GqlAttachmentInfo {
+/// Attachment with metadata and lazy content resolution.
+/// Query just metadata fields (blobId, name, size, etc.) for listings,
+/// or include `content` to download and process the attachment data.
+pub struct GqlAttachment {
     pub blob_id: String,
     pub name: Option<String>,
     pub content_type: Option<String>,
@@ -205,24 +227,95 @@ pub struct GqlAttachmentInfo {
     pub disposition: Option<String>,
 }
 
-impl From<&EmailBodyPart> for GqlAttachmentInfo {
-    fn from(a: &EmailBodyPart) -> Self {
-        Self {
-            blob_id: a.blob_id.clone().unwrap_or_default(),
-            name: a.name.clone(),
-            content_type: a.content_type.clone(),
-            size: a.size,
-            disposition: a.disposition.clone(),
+#[Object(name = "Attachment")]
+impl GqlAttachment {
+    async fn blob_id(&self) -> &str {
+        &self.blob_id
+    }
+    async fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    async fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+    async fn size(&self) -> u64 {
+        self.size
+    }
+    async fn disposition(&self) -> Option<&str> {
+        self.disposition.as_deref()
+    }
+    /// Fetch the actual attachment content. Images are resized and base64-encoded,
+    /// documents have text extracted. Only fetched when this field is included in the query.
+    async fn content(&self, ctx: &Context<'_>) -> Result<GqlAttachmentContent> {
+        let client = ctx.data::<tokio::sync::Mutex<crate::jmap::JmapClient>>()?;
+        let client = client.lock().await;
+
+        let content_type = self
+            .content_type
+            .as_deref()
+            .unwrap_or("application/octet-stream");
+        let name = self.name.as_deref().unwrap_or("attachment");
+
+        let data = client.download_blob(&self.blob_id).await?;
+
+        let mime = if crate::util::is_image(content_type, name) {
+            crate::util::infer_image_mime(name).unwrap_or(content_type)
+        } else {
+            content_type
+        };
+
+        // Images — resize and base64 encode
+        if crate::util::is_image(mime, name) {
+            return match crate::util::resize_image(&data, mime, crate::util::MCP_IMAGE_MAX_BYTES) {
+                Ok((processed_data, _mime_type)) => {
+                    let base64_data = base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &processed_data,
+                    );
+                    Ok(GqlAttachmentContent {
+                        size: processed_data.len(),
+                        base64_content: Some(base64_data),
+                        text_content: None,
+                        info: None,
+                    })
+                }
+                Err(e) => Err(async_graphql::Error::new(format!(
+                    "Failed to process image: {e}"
+                ))),
+            };
         }
+
+        // Documents — extract text
+        match crate::util::extract_text(&data, name).await {
+            Ok(Some(text)) => {
+                return Ok(GqlAttachmentContent {
+                    size: data.len(),
+                    base64_content: None,
+                    text_content: Some(text),
+                    info: None,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(async_graphql::Error::new(format!(
+                    "Failed to extract text: {e}"
+                )));
+            }
+        }
+
+        // Binary fallback
+        Ok(GqlAttachmentContent {
+            size: data.len(),
+            base64_content: None,
+            text_content: None,
+            info: Some("Binary attachment — cannot be displayed directly.".to_string()),
+        })
     }
 }
 
 #[derive(SimpleObject)]
 #[graphql(name = "AttachmentContent")]
 pub struct GqlAttachmentContent {
-    pub blob_id: String,
-    pub name: String,
-    pub content_type: String,
     pub size: usize,
     /// For images: base64-encoded image data
     pub base64_content: Option<String>,
@@ -239,6 +332,10 @@ pub struct GqlIdentity {
     pub name: String,
     pub email: String,
     pub may_delete: bool,
+    pub text_signature: Option<String>,
+    pub html_signature: Option<String>,
+    pub reply_to: Vec<GqlEmailAddress>,
+    pub bcc: Vec<GqlEmailAddress>,
 }
 
 impl From<Identity> for GqlIdentity {
@@ -248,6 +345,10 @@ impl From<Identity> for GqlIdentity {
             name: i.name,
             email: i.email,
             may_delete: i.may_delete,
+            text_signature: i.text_signature,
+            html_signature: i.html_signature,
+            reply_to: convert_addrs(i.reply_to),
+            bcc: convert_addrs(i.bcc),
         }
     }
 }
@@ -383,10 +484,19 @@ pub struct GqlStatus {
     pub error: Option<String>,
 }
 
-/// Thread result containing all emails in a conversation
-#[derive(SimpleObject)]
-#[graphql(name = "Thread")]
+/// Thread result containing all emails in a conversation with full content.
+/// Each email has lazy attachment content resolution — only fetched when queried.
 pub struct GqlThread {
-    pub emails: Vec<GqlEmailSummary>,
+    pub emails: Vec<Email>,
     pub total: usize,
+}
+
+#[Object(name = "Thread")]
+impl GqlThread {
+    async fn emails(&self) -> Vec<GqlEmail> {
+        self.emails.iter().cloned().map(GqlEmail).collect()
+    }
+    async fn total(&self) -> usize {
+        self.total
+    }
 }
