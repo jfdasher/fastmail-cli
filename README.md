@@ -370,15 +370,50 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 
 Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
 
-The MCP server exposes 18 tools for email operations:
+The MCP server exposes **2 tools** via a GraphQL interface:
 
-- **Reading**: `list_mailboxes`, `list_emails`, `get_email`, `search_emails`
-- **Actions**: `move_email`, `mark_as_read`, `mark_as_spam`
-- **Sending**: `send_email`, `reply_to_email`, `forward_email` (preview/confirm flow, `--from` identity selection)
-- **Identities**: `list_identities`
-- **Attachments**: `list_attachments`, `get_attachment` (auto text extraction, image resizing)
-- **Contacts**: `search_contacts` (requires app password)
-- **Masked Email**: `list_masked_emails`, `create_masked_email`, `enable_masked_email`, `disable_masked_email`, `delete_masked_email`
+- **`schema_sdl`** — returns the full GraphQL schema (SDL) so the LLM can discover all available operations
+- **`graphql`** — executes any GraphQL query or mutation against the Fastmail API
+
+This replaces the previous 18 individual tools with a composable interface. The LLM fetches the schema once, then constructs exactly the queries it needs — fetching multiple resources in a single round-trip, requesting only the fields it wants, and using typed arguments for filtering and pagination.
+
+### Nested resolution
+
+Queries support deep nesting so the LLM can get everything it needs in one hit:
+
+```graphql
+# Email with full attachment content in a single query
+{
+  email(id: "abc123") {
+    subject
+    from { name email }
+    textBody
+    attachments {
+      name
+      contentType
+      size
+      content { textContent base64Content }
+    }
+  }
+}
+
+# Entire thread with all emails and their attachments
+{
+  thread(emailId: "abc123") {
+    total
+    emails {
+      subject
+      from { email }
+      textBody
+      attachments { name size }
+    }
+  }
+}
+```
+
+Attachment `content` is lazily resolved — only fetched when the field is included in the query. Omit it for fast metadata-only listings.
+
+All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
 
 Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 
