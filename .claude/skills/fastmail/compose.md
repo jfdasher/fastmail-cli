@@ -1,9 +1,19 @@
 ---
 name: fastmail/compose
-description: fastmail-cli send, reply, forward, draft — flags, identities, and compose patterns
+description: fastmail-cli send, reply, forward, draft — flags, identities, and compose patterns. REQUIRES USER CONFIRMATION before sending.
+allowed-tools: Bash
 ---
 
 # fastmail-cli — Compose (Send / Reply / Forward / Draft)
+
+## Safety Rules
+
+1. **Before executing `send`, `reply`, or `forward` without `--draft`**: Display the full command to the user — including all recipients, subject, and body text — and ask "Should I send this?" Wait for explicit yes.
+2. **Ambiguous intent → use `--draft`**: If the user says "write a reply", "draft an email", or "compose a message", always use `--draft`. Only omit `--draft` when the user clearly wants to send ("send this to Bob", "reply saying yes").
+3. **Never add recipients the user did not specify.**
+4. **Never send bulk emails.** Do not loop over recipient lists or search results to send multiple messages.
+
+---
 
 ## Identities
 

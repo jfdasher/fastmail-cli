@@ -1,11 +1,28 @@
 ---
 name: fastmail
-description: Complete reference for fastmail-cli — all commands, flags, config, and common patterns
+description: Email management via fastmail-cli — read, search, compose, triage, contacts, and masked email for jfd@thermopylae.com. Invoke when the user asks about email, messages, inbox, or contacts.
+allowed-tools: Bash
 ---
 
 # fastmail-cli — Complete Reference
 
-fastmail-cli is a Rust CLI for Fastmail via JMAP (email) and CardDAV (contacts). All output is JSON: `{"success": true, "data": {...}}`.
+fastmail-cli is a Rust CLI for Fastmail via JMAP (email) and CardDAV (contacts). All output is JSON: `{"success": true, "data": {...}}`. The user's account is **jfd@thermopylae.com**.
+
+## Safety Rules
+
+### Compose Operations Require Confirmation
+
+Before executing `send`, `reply`, or `forward` without `--draft`: display the full command to the user — including all recipients, subject, and body — and ask "Should I send this?" Wait for explicit yes.
+
+When intent is ambiguous ("write a reply", "draft an email"), default to `--draft`. Only omit `--draft` when the user clearly intends to send immediately.
+
+### Mass-Destructive Operations Are Forbidden
+
+**Never** iterate over search or list results to apply destructive operations to multiple emails. No loops, xargs pipelines, or shell scripts that apply `send`, `reply`, or `forward` to multiple items. If the user asks for bulk sending, explain this must be done via the Fastmail web interface.
+
+### Never Skip CLI Confirmation Prompts
+
+Never pass `-y` or `--yes` to bypass the CLI's built-in confirmation prompts.
 
 ## Setup
 
@@ -72,7 +89,7 @@ fastmail-cli forward EMAIL_ID --to ADDR [--body STR] [--cc] [--bcc] [--from IDEN
 ```bash
 fastmail-cli move EMAIL_ID --to MAILBOX
 fastmail-cli mark-read EMAIL_ID [--unread]
-fastmail-cli spam EMAIL_ID [-y]
+fastmail-cli spam EMAIL_ID
 ```
 
 ### Attachments
